@@ -1,4 +1,5 @@
 import threading
+from collections.abc import Iterable, Iterator
 from typing import Callable
 
 import numpy as np
@@ -10,6 +11,12 @@ from negpy.infrastructure.scanners.base import (
     ScannerUnavailable,
     TransientScanError,
 )
+
+from negpy.infrastructure.scanners.roll import (
+    RollPreview,
+    RollSession,
+)
+
 from negpy.infrastructure.scanners.params import ScanParams
 from negpy.infrastructure.scanners.result import ScanResult
 from negpy.kernel.system.logging import get_logger
@@ -28,17 +35,15 @@ def _caps_from_nkscan(caps, sensed_frames: int | None = None) -> ScannerCapabili
 
     `sensed_frames` is what the loaded carrier reports, when it was readable.
     """
-    frame_control = bool(caps.frame_control)
     return ScannerCapabilities(
         ir_channel=bool(caps.ir_channel),
         supported_dpi=tuple(sorted(int(d) for d in caps.dpi)),
-        supported_depths=tuple(sorted(int(d) for d in caps.depths)) or (16,),
+        supported_depths=tuple([caps.depth,]),
         # nkscan devices are dedicated film scanners with no source selector at all.
         sources=(ScanMode.NEGATIVE, ScanMode.POSITIVE, ScanMode.TRANSPARENCY),
         max_area_mm=(float(caps.max_area_mm[0]), float(caps.max_area_mm[1])),
         auto_exposure=bool(caps.auto_exposure),
-        adapter_frame_capacity=_strip_capacity(sensed_frames) if frame_control else None,
-        adapter_frame_control=frame_control,
+        adapter_frame_capacity=_strip_capacity(sensed_frames),
         can_eject=bool(caps.can_eject),
         multisample=tuple(sorted(int(m) for m in caps.multisample)) or (1,),
         single_line=bool(caps.single_line),
@@ -240,6 +245,10 @@ class NkscanBackend:
         except Exception as e:
             raise _as_scan_error(e) from e
         return NkscanSession(session, lock_white_balance=lock_white_balance)
+    
+    def open_roll(self, device_id: str, *, dpi: int):
+        session = self._nkscan.Session(device_id)
+        return NkscanRollSession(session, dpi=dpi)
 
     def scan(
         self,
@@ -250,9 +259,141 @@ class NkscanBackend:
     ) -> ScanResult:
         with self.open_session(device_id) as session:
             return session.scan(params, progress, cancel)
+        
+    def roll_preview(
+        self,
+        device_id: str,
+        cancel: threading.Event,
+    ) -> np.ndarray:
+        """Preview the whole strip in one pass, returning a single RGB array.
+
+        The caller can slice it into frames and apply offsets. The transport may
+        not support this, in which case it raises ScannerUnavailable.
+        """
+        with self.open_session(device_id) as session:
+            try:
+                return session.roll_preview(progress=lambda _fraction: None, cancel=cancel).rgb
+            except Exception as e:
+                raise _as_scan_error(e) from e
 
     def eject(self, device_id: str) -> bool:
         # NkscanSession.eject() already terminates the session itself; no `with`
         # here, or it would close a second time (harmless — Session.close() is
         # idempotent — but pointless).
         return self.open_session(device_id).eject()
+
+class NkscanRollSession:
+    """
+    Whole-strip preview using nkscan's native roll preview traversal.
+
+    The scanner moves once, returning a complete strip raster. Frame boundaries
+    are projected from the adapter pitch and returned as individual previews.
+    """
+
+    def __init__(self, session, *, dpi: int):
+        self._session = session
+        self._dpi = dpi
+
+        caps = session.capabilities
+
+        self.slot_count = session.sensed_frames() or 1
+
+        self.offset_range = (0.0, 1.0)
+
+        # Native traversal means scanning one slot separately is meaningless.
+        self.supports_single_slot_preview = False
+
+        self._pitch_mm = 25.4 / dpi
+
+        self._offsets: dict[int, float] = {}
+
+        self._closed = False
+
+
+    def set_offset(self, slot: int, offset: float) -> None:
+        self._offsets[slot] = offset
+
+
+    def approve(self, slot: int) -> None:
+        # Native preview does not infer boundaries yet.
+        pass
+
+
+    def preview(
+        self,
+        slots: Iterable[int],
+        *,
+        cancel: threading.Event,
+    ) -> Iterator[RollPreview]:
+
+        if cancel.is_set():
+            return
+
+        try:
+            strip = self._session.overview(
+                progress=lambda *_: not cancel.is_set(),
+            )
+
+        except Exception as e:
+            logger.warning("Whole-strip preview failed: %s", e)
+            for slot in slots:
+                yield RollPreview(
+                    slot=slot,
+                    error=str(e),
+                )
+            return
+
+
+        frames = self._split_frames(strip.rgb)
+
+        wanted = set(slots)
+
+        for index, frame in enumerate(frames, start=1):
+            if cancel.is_set():
+                return
+
+            if index not in wanted:
+                continue
+
+            yield RollPreview(
+                slot=index,
+                rgb=frame,
+                offset=self._offset_fraction(index),
+            )
+
+
+    def _split_frames(self, image: np.ndarray) -> list[np.ndarray]:
+        """
+        Split the continuous strip raster into frame previews.
+
+        Currently assumes equal pitch. Later this can use boundary detection.
+        """
+
+        if self.slot_count <= 1:
+            return [image]
+
+        height = image.shape[0]
+
+        frame_height = height / self.slot_count
+
+        frames = []
+
+        for i in range(self.slot_count):
+            start = round(i * frame_height)
+            end = round((i + 1) * frame_height)
+
+            frames.append(
+                image[start:end, :]
+            )
+
+        return frames
+
+
+    def _offset_fraction(self, slot: int) -> float:
+        return self._offsets.get(slot, 0.0)
+
+
+    def close(self) -> None:
+        if not self._closed:
+            self._session.close()
+            self._closed = True

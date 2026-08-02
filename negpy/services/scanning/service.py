@@ -8,6 +8,7 @@ from negpy.infrastructure.scanners.base import (
     ScannerSession,
     TransientScanError,
 )
+from negpy.infrastructure.scanners.nkscan_backend import NkscanBackend
 from negpy.infrastructure.scanners.params import ScanParams
 from negpy.infrastructure.scanners.per_frame_roll import PerFrameRollSession
 from negpy.infrastructure.scanners.result import ScanResult
@@ -71,6 +72,9 @@ class ScannerService:
         wraps. A backend with a native whole-roll traversal supplies its own
         RollSession instead, and this grows a branch then — not before.
         """
+        backend = self._get_backend()
+        if isinstance(backend, NkscanBackend):
+            return backend.open_roll(device.id, dpi=dpi)
         return PerFrameRollSession(self._get_backend(), device, dpi=dpi)
 
     def run_scan(
