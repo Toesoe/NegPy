@@ -44,7 +44,7 @@ from negpy.desktop.workers.render import (
     ThumbnailUpdateTask,
     ThumbnailWorker,
 )
-from negpy.desktop.workers.scan_worker import BatchRequest, PrescanRequest, RollPreviewRequest, ScanRequest, ScanWorker
+from negpy.desktop.workers.scan_worker import BatchRequest, PrescanRequest, RollPreviewRequest, ScanRequest, StripScanRequest, ScanWorker
 from negpy.desktop.workers.library import LibrarySearchTask, LibrarySearchWorker
 from negpy.desktop.workers.hdr import HdrTask, HdrWorker
 from negpy.desktop.workers.stitch import StitchTask, StitchWorker
@@ -344,6 +344,7 @@ class AppController(QObject):
     scan_frame_done = pyqtSignal(int, str)  # batch: frame number, rgb path
     scan_batch_finished = pyqtSignal(list)  # batch: all completed rgb paths
     scan_batch_requested = pyqtSignal(BatchRequest)
+    scan_strip_requested = pyqtSignal(StripScanRequest)
     scan_eject_requested = pyqtSignal(str)
     scan_roll_preview_requested = pyqtSignal(RollPreviewRequest)
     scan_roll_preview_ready = pyqtSignal(object)  # one RollPreview per strip slot
@@ -695,6 +696,7 @@ class AppController(QObject):
         self.scan_worker.error.connect(self.scan_error.emit)
         self.scan_requested.connect(self.scan_worker.run_scan)
         self.scan_batch_requested.connect(self.scan_worker.run_batch)
+        self.scan_strip_requested.connect(self.scan_worker.run_strip)
         self.scan_eject_requested.connect(self.scan_worker.eject)
         self.scan_worker.cancelled.connect(self.scan_cancelled.emit)
         self.scan_worker.frame_done.connect(self.scan_frame_done.emit)
@@ -3229,6 +3231,14 @@ class AppController(QObject):
         self.scan_worker.prepare_scan()
         self.scan_started.emit()
         self.scan_batch_requested.emit(req)
+
+    def start_strip(self, req: StripScanRequest) -> None:
+        """Start one whole-strip acquisition (Pakon/psix): a single pass that
+        returns every enumerated frame. Progress and completion reuse the batch
+        signals (scan_frame_done / scan_batch_finished)."""
+        self.scan_worker.prepare_scan()
+        self.scan_started.emit()
+        self.scan_strip_requested.emit(req)
 
     def start_roll_preview(self, req: RollPreviewRequest) -> None:
         """Preview strip slots (results via scan_roll_preview_ready, then

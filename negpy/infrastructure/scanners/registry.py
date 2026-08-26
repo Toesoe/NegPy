@@ -33,6 +33,12 @@ def _make_pieusb() -> ScannerBackend:
     return PieusbBackend()
 
 
+def _make_psix() -> ScannerBackend:
+    from negpy.infrastructure.scanners.psix_backend import PsixBackend
+
+    return PsixBackend()
+
+
 DEFAULT_BACKEND_ID = "plustek" if sys.platform == "win32" else "sane"
 
 # id -> (display label, factory). Insertion order drives the sidebar dropdown. SANE is
@@ -40,6 +46,7 @@ DEFAULT_BACKEND_ID = "plustek" if sys.platform == "win32" else "sane"
 BACKENDS: dict[str, tuple[str, Callable[[], ScannerBackend]]] = {
     "plustek": ("pyOpticfilm (Plustek)", _make_plustek),
     "pieusb": ("PIEUSB", _make_pieusb),
+    "psix": ("Pakon F135 (psix)", _make_psix),
 }
 if sys.platform != "win32":
     BACKENDS = {

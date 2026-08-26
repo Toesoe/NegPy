@@ -100,6 +100,37 @@ class ScannerService:
                     raise
         raise RuntimeError("unreachable")  # pragma: no cover
 
+    def run_strip(
+        self,
+        device_id: str,
+        params: ScanParams,
+        progress: Callable[[float, str], None],
+        cancel: threading.Event,
+        *,
+        retry_delay: float = _SCAN_IO_RETRY_DELAY_S,
+    ) -> list[ScanResult]:
+        """One whole-strip acquisition (capabilities.whole_strip transports): the
+        backend reads the entire strip and the enumerated frames come back.
+        Retried on transient USB/HTTP glitches like run_scan."""
+        backend = self._get_backend()
+        for attempt in range(1, _SCAN_IO_RETRY_ATTEMPTS + 1):
+            try:
+                return backend.scan_strip(device_id, params, progress, cancel)
+            except TransientScanError as e:
+                if attempt >= _SCAN_IO_RETRY_ATTEMPTS or cancel.is_set():
+                    raise
+                logger.warning(
+                    "Transient scanner I/O on %s (attempt %d/%d), retrying: %s",
+                    device_id,
+                    attempt,
+                    _SCAN_IO_RETRY_ATTEMPTS,
+                    e,
+                )
+                cancel.wait(retry_delay)
+                if cancel.is_set():
+                    raise
+        raise RuntimeError("unreachable")  # pragma: no cover
+
     def write_result(
         self,
         result: ScanResult,

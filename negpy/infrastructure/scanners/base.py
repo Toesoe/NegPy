@@ -41,6 +41,9 @@ class ScannerCapabilities:
     can_eject: bool = False
     frame_pitch_mm: float = 0.0  # feed-axis distance between frame positions; 0.0 = unknown
     exposure_time_us: tuple[int, int] | None = None  # (min, max) in microseconds
+    #: Whole-strip transport (Pakon/psix): one acquisition reads the entire strip
+    #: and the frames come back enumerated — no preview, no per-frame addressing.
+    whole_strip: bool = False
 
 
 @dataclass(frozen=True)

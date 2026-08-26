@@ -561,6 +561,26 @@ class ScanSidebar(QWidget):
             self.frame_from_spin.setValue(frm)
             self.frame_to_spin.setValue(to)
 
+        # Whole-strip transport (Pakon/psix): no per-frame addressing, no window,
+        # no preview — one Scan press reads the entire strip and enumerates frames.
+        if getattr(caps, "whole_strip", False):
+            self.frame_range_label.setVisible(False)
+            self.frame_range_widget.setVisible(False)
+            self.scan_window_row_label.setVisible(False)
+            self.scan_window_widget.setVisible(False)
+            self.scan_window_status.setVisible(False)
+            self.prescan_label.setVisible(False)
+            self.prescan_widget.setVisible(False)
+            self.prescan_status.setVisible(False)
+            self.dpi_combo.blockSignals(False)
+            self.depth_combo.blockSignals(False)
+            self.ir_check.blockSignals(False)
+            self.me_check.blockSignals(False)
+            self.ae_check.blockSignals(False)
+            self.frame_from_spin.blockSignals(False)
+            self.frame_to_spin.blockSignals(False)
+            return
+
         # Scan window: SANE-only crop UI (strip feeder or QuickScanPreviewDialog).
         # pyOpticfilm uses Prescan instead; both wrote the same scan_window setting.
         use_sane_window = self._current_backend_id() != "plustek"
@@ -791,7 +811,19 @@ class ScanSidebar(QWidget):
         self.set_scanning(True)
 
         try:
-            if device.capabilities.adapter_frame_capacity is not None:
+            if getattr(device.capabilities, "whole_strip", False):
+                from negpy.desktop.workers.scan_worker import StripScanRequest
+
+                self.controller.start_strip(
+                    StripScanRequest(
+                        device_id=device.id,
+                        params=base_params,
+                        output_folder=output_folder,
+                        filename_pattern=pattern,
+                        output_format=fmt,
+                    )
+                )
+            elif device.capabilities.adapter_frame_capacity is not None:
                 self.controller.start_batch(
                     BatchRequest(
                         device_id=device.id,

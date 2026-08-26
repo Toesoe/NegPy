@@ -42,6 +42,18 @@ class PrescanRequest:
 
 
 @dataclass(frozen=True)
+class StripScanRequest:
+    """One whole-strip acquisition (Pakon/psix): the backend reads the entire
+    strip and every enumerated frame is written frame-numbered."""
+
+    device_id: str
+    params: ScanParams
+    output_folder: str
+    filename_pattern: str
+    output_format: str  # "TIFF" or "DNG"
+
+
+@dataclass(frozen=True)
 class BatchRequest:
     """Scan an explicit set of frames, one SANE session each, frame-numbered output."""
 
@@ -187,6 +199,76 @@ class ScanWorker(QObject):
             self.cancelled.emit()
         else:
             self.error.emit(payload or "Unknown scan error")
+
+    @pyqtSlot(StripScanRequest)
+    def run_strip(self, req: StripScanRequest) -> None:
+        """Whole-strip acquisition: one backend pass, N enumerated frames written.
+
+        Mirrors run_batch's outcome handling: batch_finished always fires with the
+        frames that completed, so a stop or a late-frame error still imports the rest.
+        """
+        with self._state_lock:
+            if not self._request_prepared:
+                self._cancel_event.clear()
+            self._request_prepared = False
+            self._scanning = True
+
+        assertion = acquire_unattended_power_assertion("NegPy film strip scan")
+        paths: list[str] = []
+        outcome: tuple[str, str | None] = ("finished", None)
+        try:
+            service = self._ensure_service()
+            try:
+                results = service.run_strip(
+                    device_id=req.device_id,
+                    params=req.params,
+                    progress=lambda fraction, phase="Scanning": self.progress.emit(fraction, phase),
+                    cancel=self._cancel_event,
+                )
+            except Exception as error:
+                if self._cancel_event.is_set():
+                    outcome = ("cancelled", None)
+                else:
+                    logger.exception("Strip scan failed")
+                    outcome = ("error", str(error))
+            else:
+                for index, result in enumerate(results):
+                    if self._cancel_event.is_set():
+                        outcome = ("cancelled", None)
+                        break
+                    try:
+                        path = service.write_result(
+                            result=result,
+                            output_folder=req.output_folder,
+                            filename_pattern=req.filename_pattern,
+                            output_format=req.output_format,
+                            seq=index + 1,
+                        )
+                    except Exception as error:
+                        logger.exception("Could not write strip frame %d", index + 1)
+                        outcome = ("error", str(error))
+                        break
+                    paths.append(path)
+                    self.frame_done.emit(index + 1, path)
+        except Exception as error:
+            logger.exception("Could not initialize scanner service")
+            outcome = ("error", str(error))
+        finally:
+            assertion.release()
+            with self._state_lock:
+                self._scanning = False
+
+        if outcome[0] == "finished" and not paths and not self._cancel_event.is_set():
+            outcome = ("error", "the strip produced no frames")
+        self.batch_finished.emit(paths)
+        kind, payload = outcome
+        if kind == "cancelled":
+            self.cancelled.emit()
+        elif kind == "error":
+            self.error.emit(payload or "Unknown strip scan error")
+        elif kind == "finished":
+            # Push the strip clear of the transport, matching batch behaviour.
+            self.eject(req.device_id)
 
     @pyqtSlot(BatchRequest)
     def run_batch(self, req: BatchRequest) -> None:
